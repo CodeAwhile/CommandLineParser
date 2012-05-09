@@ -4,6 +4,7 @@
     using System.Collections.Generic;
     using System.Linq;
     using System.Text;
+    using System.Text.RegularExpressions;
 
     // TODO:
     // 1. aliases, e.g., -v and --verbose
@@ -17,6 +18,7 @@
             _paramDelims = paramDelims.ToArray();
             _valueDelims = valueDelims.ToArray();
             _parameters = new Dictionary<string, Type>();
+            _commandLineRegex = BuildCommandLineRegex(_paramDelims, _valueDelims);
         }
 
         // TODO: need an add that specifies usage
@@ -36,38 +38,52 @@
             throw new NotImplementedException();
         }
 
-        // TODO@crbouch: this got messy quick. Need to refactor this method.
-        // TODO@crbouch: also, this is breaking one of the tests because it's stripping off the _paramDelims of a param that's not known
         public Dictionary<string, object> ParseCommandLine(string[] args, out string[] unparsed)
         {
-            string cmdLine = String.Join(_defaultParamDelim, args);
+            var paramsWithValues = new Dictionary<string, object>();
+            var unparsedStrings = new List<string>();
+            foreach (var arg in args)
+            {
+                var m = _commandLineRegex.Match(arg);
+                var swtch = GetSwitch(m);
+                var param = GetParam(m);
+                var value = GetValue(m);
 
-            var pieces = cmdLine.Split(_paramDelims, StringSplitOptions.RemoveEmptyEntries)
-                                .Select(param => param.Split(new string[] { _defaultParamDelim },
-                                                             StringSplitOptions.RemoveEmptyEntries));
+                // Bail if the regex doesn't match or if the parameter hasn't been declared
+                if (!m.Success || (!_parameters.ContainsKey(swtch) && !_parameters.ContainsKey(param)))
+                {
+                    unparsedStrings.Add(arg);
+                    continue;
+                }
 
-            unparsed = pieces.SelectMany(paramArray => paramArray.Where((param, index) => index > 0)).ToArray();
+                // Really there are only two options, but for consistency they are enumerated explicitly
+                if (!String.IsNullOrEmpty(swtch))
+                {
+                    paramsWithValues.Add(swtch, ParseToSupportedType(_defaultSwitchValue, _parameters[swtch]));
+                }
+                else if (!String.IsNullOrEmpty(param))
+                {
+                    paramsWithValues.Add(param, ParseToSupportedType(GetValue(m), _parameters[param]));
+                }
+                else
+                {
+                    // we shouldn't be here... unless someone broke the regular expression.
+                    throw new ApplicationException(
+                        String.Format("Parsing command line failed at argument: '{0}'\nUnrecognized parameter.", arg));
+                }
+            }
 
-            pieces = pieces.Select(paramArray => paramArray[0])
-                           .Select(param => param.Split(_valueDelims, StringSplitOptions.RemoveEmptyEntries));
-
-            unparsed = unparsed.Union(pieces.Where(paramValueArray => !_parameters.ContainsKey(paramValueArray[0])).SelectMany(paramValueArray => paramValueArray)).ToArray();
-            pieces = pieces.Where(paramValueArray => _parameters.ContainsKey(paramValueArray[0]));
-            
-            var parameters = pieces.Where(paramValueArray => paramValueArray.Length > 1);
-            var switches   = pieces.Where(paramValueArray => paramValueArray.Length == 1)
-                                   .Select(paramValueArray => new string[] { paramValueArray[0], _defaultSwitchValue });
-
-            return parameters.Union(switches)
-                             .ToDictionary(paramValueArray => paramValueArray[0],
-                                           paramValueArray => ParseToSupportedType(paramValueArray[1], _parameters[paramValueArray[0]]));
+            unparsed = unparsedStrings.ToArray();
+            return paramsWithValues;
         }
 
         // TODO@crbouch: There's gotta be a better way than this. Reflection is hella slow.
-        //               Maybe some straight-up reflection inside a T4 or something to generate the methods... I don't know.
+        //         Maybe some straight-up reflection inside a T4 or something to generate the methods... I don't know.
         public object ParseToSupportedType(string value, Type type)
         {
-            var meth = type.GetMethod("Parse", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+            var meth = type.GetMethod("Parse",
+                                      System.Reflection.BindingFlags.Static |
+                                      System.Reflection.BindingFlags.Public);
             if (meth != null)
             {
                 return meth.Invoke(null, new object[] { value });
@@ -75,10 +91,34 @@
             return null;
         }
 
+        protected Regex BuildCommandLineRegex(string[] paramDelims, string[] valueDelims)
+        {
+            string paramFormat = @"(?:(?:{0})(?<paramName>\w+)(?:{1})(?<value>\w+))|(?:(?:{0})(?<switch>\w+))";
+            return new Regex(
+                String.Format(paramFormat, String.Join("|", paramDelims), String.Join("|", valueDelims)),
+                RegexOptions.Compiled);
+        }
+
+        private string GetSwitch(Match m)
+        {
+            return m.Groups["switch"].Value;
+        }
+
+        private string GetParam(Match m)
+        {
+            return m.Groups["paramName"].Value;
+        }
+
+        private string GetValue(Match m)
+        {
+            return m.Groups["value"].Value;
+        }
+
         protected string _defaultSwitchValue = "true";
         protected string _defaultParamDelim = " ";
         protected Dictionary<string, Type> _parameters;
         protected string[] _paramDelims;
         protected string[] _valueDelims;
+        protected Regex _commandLineRegex;
     }
 }
